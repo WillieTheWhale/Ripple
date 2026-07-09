@@ -23,9 +23,25 @@ self-hosted engine (the design's §12 understudy; the same JSON deploys to Cloud
   `Authorization: Bearer ripple-local-dev-key`. Body routed by content type; the `response*`
   node's captured lanes come back in the same HTTP response under
   `data.objects.body.<result key>` (e.g. `answers` for provider `response_answers` with
-  `config.laneName: "answers"`). Send questions as JSON or text; verify empirically what the
-  webhook routes to the `questions` lane (likely `Content-Type: text/plain` body, or JSON —
-  test both, and if JSON arrives as `text` lane instead, use text/plain).
+  `config.laneName: "answers"`).
+- VERIFIED LIVE (a Gemini agent answered "391" to 17*23 through this exact path): POST with
+  header `Content-Type: lane/questions` and body `{"questions": [{"text": "<the question —
+  put the whole JSON task payload here as a string>"}]}` (Question schema:
+  `infra/rocketride/rocketride/schema/question.py`; the agent reads `questions[].text`;
+  a bare `{"text": ...}` does NOT reach the agent). `lane/<name>` content types force lane
+  routing (`ai/modules/data/data_conn.py:_determine_lane`). The answer returns in the same
+  HTTP response at `data.objects.body.answers[0]`.
+- VERIFIED: llm_gemini works with profile `gemini-3-flash-preview` (also available:
+  gemini-3-pro-preview, gemini-2.5-pro — see nodes/llm_gemini/services.json). Use
+  gemini-3-pro-preview for the P2 agent LLM (planning quality) and gemini-3-flash-preview
+  for the db_neo4j Cypher-generation LLM (fast, cheap). API key: fresh key in `.env`
+  ROCKETRIDE_GEMINI_KEY (minted 2026-07-09 on the user's GCP project; the engine does NOT
+  see your shell env — inline the key into the .pipe at gateway load time by reading .env
+  and substituting ${ROCKETRIDE_GEMINI_KEY} etc. client-side before client.use(); commit
+  pipes with the ${VAR} placeholders only).
+- A working reference pipe (webhook→agent_rocketride(llm_gemini+memory_internal)→
+  response_answers) that produced the live answer: /tmp/agent-test.pipe — copy its
+  structure.
 - .pipe JSON format (see working examples in `specs/examples/*.pipe`):
   - `components[]`: `{id, provider, name?, config{...}, input: [{lane, from}],
     control: [{classType: llm|memory|tool, from: <agentId>}]}` — note `control` lives on the
@@ -59,11 +75,17 @@ self-hosted engine (the design's §12 understudy; the same JSON deploys to Cloud
 ### 1. `services/ripple-mcp/` — RIPPLE's own MCP server (Python, FastMCP or the official
 `mcp` package, streamable-http transport on port 8790)
 
+CRITICAL CONSTRAINT: tool_mcp_client enforces a 20-second timeout per tools/call. Any
+tool that can exceed ~15s MUST be job-shaped: return `{job_id, status:"running"}`
+immediately from a background thread/task, with a `job_status(job_id) -> {status:
+running|done|failed, result?, error?, progress?}` tool the agent polls. Fast queries
+(blast_radius, resolve, stats) stay synchronous.
+
 Tools (thin wrappers over `core/` — import ripple package directly):
-- `ingest_repo(repo_url_or_path: str, repo_id: str, wipe: bool = true) -> {summary}` —
-  runs the Phase 1 ingest (this is where Bolt WRITES happen; the agent never writes — §4b).
-  Long-running: stream progress if the transport supports it, else just return the final
-  summary dict.
+- `ingest_repo(repo_url_or_path: str, repo_id: str, wipe: bool = true) -> {job_id}` —
+  job-shaped (see above). Runs the Phase 1 ingest in a worker thread (this is where Bolt
+  WRITES happen; the agent never writes — §4b). Progress stages surfaced via job_status.
+- `job_status(job_id)` — poll tool for all job-shaped tools.
 - `blast_radius(repo_id: str, fqn: str, max_hops: int = 4) -> BlastResult as dict` — Phase 2
   canned query (the "canned Cypher behind a UI toggle" fallback of §12, and the reliable
   path the agent can use when db_neo4j NL→Cypher is flaky; the returned dict includes the

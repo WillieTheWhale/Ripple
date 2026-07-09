@@ -1,0 +1,20 @@
+[project]
+name = "ripple-api"
+version = "0.1.0"
+description = "RIPPLE read-only query API"
+requires-python = ">=3.12"
+dependencies = [
+    "fastapi>=0.115",
+    "uvicorn>=0.34",
+    "ripple",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+packages = ["src/ripple_api"]
+
+[tool.uv.sources]
+ripple = { path = "../../core", editable = true }

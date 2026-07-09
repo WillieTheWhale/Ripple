@@ -6,7 +6,7 @@ import pytest
 
 from ripple.ingest.covers import add_static_covers
 from ripple.ingest.extract import extract
-from ripple.ingest.mapping import MappedGraph, map_graph
+from ripple.ingest.mapping import MappedGraph, MappedNode, map_graph
 from ripple.ingest.risk import apply_risk
 
 FIXTURE = Path(__file__).parent / "fixtures" / "miniproj"
@@ -70,3 +70,54 @@ def test_risk_scores_most_called_function_max(mapped_pair: tuple[object, MappedG
     assert all(0.0 <= score <= 1.0 for score in scores.values())
     assert set(communities) == set(scores)
     assert all("community" in node.properties for node in mapped.nodes_with_label("Function"))
+
+
+def test_risk_pagerank_excludes_test_functions() -> None:
+    mapped = MappedGraph(repo_id="mini")
+    for fqn, name, is_test in (
+        ("src/app.py:prod_caller", "prod_caller", False),
+        ("src/app.py:prod_target", "prod_target", False),
+        ("src/app.py:test_only_target", "test_only_target", False),
+        ("tests/test_app.py:test_target", "test_target", True),
+    ):
+        uid = f"mini#{fqn}"
+        labels = ("Function", "Test") if is_test else ("Function",)
+        mapped.add_node(
+            MappedNode(
+                uid=uid,
+                labels=labels,
+                properties={
+                    "uid": uid,
+                    "fqn": fqn,
+                    "name": name,
+                    "file_path": fqn.split(":", maxsplit=1)[0],
+                    "is_test": is_test,
+                    "repo_id": "mini",
+                },
+            )
+        )
+        mapped.function_by_fqn[fqn] = uid
+
+    mapped.add_relationship(
+        "CALLS",
+        mapped.function_by_fqn["src/app.py:prod_caller"],
+        mapped.function_by_fqn["src/app.py:prod_target"],
+        "Function",
+        "Function",
+    )
+    mapped.add_relationship(
+        "CALLS",
+        mapped.function_by_fqn["tests/test_app.py:test_target"],
+        mapped.function_by_fqn["src/app.py:test_only_target"],
+        "Function",
+        "Function",
+        {"count": 100},
+    )
+
+    scores, communities = apply_risk(mapped)
+
+    assert scores["src/app.py:prod_target"] == 1.0
+    assert scores["src/app.py:test_only_target"] == 0.0
+    assert scores["tests/test_app.py:test_target"] == 0.0
+    assert communities["src/app.py:test_only_target"] != -1
+    assert communities["tests/test_app.py:test_target"] != -1

@@ -1,0 +1,76 @@
+{
+ "components": [
+  {
+   "id": "in",
+   "provider": "webhook",
+   "config": {
+    "mode": "Source",
+    "parameters": {},
+    "type": "webhook"
+   }
+  },
+  {
+   "id": "agent",
+   "provider": "agent_rocketride",
+   "config": {
+    "instructions": [
+     "You are a test agent. Answer the question directly and concisely."
+    ],
+    "max_waves": 3,
+    "parameters": {}
+   },
+   "input": [
+    {
+     "lane": "questions",
+     "from": "in"
+    }
+   ]
+  },
+  {
+   "id": "llm",
+   "provider": "llm_gemini",
+   "config": {
+    "profile": "gemini-3-flash-preview",
+    "gemini-3-flash-preview": {
+     "apikey": "${ROCKETRIDE_GEMINI_KEY}"
+    },
+    "parameters": {}
+   },
+   "control": [
+    {
+     "classType": "llm",
+     "from": "agent"
+    }
+   ]
+  },
+  {
+   "id": "mem",
+   "provider": "memory_internal",
+   "config": {
+    "type": "memory_internal"
+   },
+   "control": [
+    {
+     "classType": "memory",
+     "from": "agent"
+    }
+   ]
+  },
+  {
+   "id": "out",
+   "provider": "response_answers",
+   "config": {
+    "laneName": "answers"
+   },
+   "input": [
+    {
+     "lane": "answers",
+     "from": "agent"
+    }
+   ]
+  }
+ ],
+ "project_id": "5bb47fba-4baf-4c69-a4ed-8cd2661b60dc",
+ "source": "in",
+ "version": 1
+}
