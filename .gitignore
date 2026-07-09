@@ -2,6 +2,9 @@ axon/.venv/
 infra/rocketride/
 *.log
 .env
+.ripple_tasks.json
+.ripple_mcp.phase3.pid
+.ripple_work/
 __pycache__/
 *.pyc
 node_modules/

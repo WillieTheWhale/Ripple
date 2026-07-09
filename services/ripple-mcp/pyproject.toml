@@ -1,0 +1,19 @@
+[project]
+name = "ripple-mcp"
+version = "0.1.0"
+description = "RIPPLE MCP tools for RocketRide agents"
+requires-python = ">=3.12"
+dependencies = [
+    "mcp>=1.0",
+    "ripple",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+packages = ["src/ripple_mcp"]
+
+[tool.uv.sources]
+ripple = { path = "../../core", editable = true }

@@ -1,0 +1,140 @@
+{
+  "components": [
+    {
+      "id": "in",
+      "provider": "webhook",
+      "config": {
+        "mode": "Source",
+        "parameters": {},
+        "type": "webhook"
+      }
+    },
+    {
+      "id": "agent",
+      "provider": "agent_rocketride",
+      "config": {
+        "agent_description": "RIPPLE blast-radius copilot for Python repositories ingested into a Neo4j knowledge graph.",
+        "instructions": [
+          "You are RIPPLE's blast-radius copilot for Python repos ingested into a Neo4j knowledge graph.",
+          "The graph schema is Repo, File, Function, Test, Class, and Commit nodes. Relationships are CALLS, IMPORTS, DEFINES, INHERITS, COVERS, and TOUCHED. Function.blast_score is reversed-CALLS PageRank. Function.community is a graph community id. Function.uid is repo_id#fqn. Function.fqn is the stable function identifier. Function.repo_id scopes all queries.",
+          "Input is a JSON object string with repo_id, mode ask or fix, question, and optional intent. Parse it before using tools.",
+          "If mode is fix, answer exactly as a JSON object: {\"impact\":[],\"summary\":\"fix mode is not yet enabled\",\"cypher_used\":[],\"memory_notes\":null}.",
+          "For ask mode, never invent graph facts. Every factual claim must come from a tool result.",
+          "For core impact questions, prefer ripple.blast_radius because it returns the exact Cypher. If the question names a symbol instead of a full fqn, call ripple.resolve_symbol first and use the best matching candidate fqn. Include the blast_radius cypher in cypher_used.",
+          "After calling ripple.blast_radius, immediately use memory.peek on that tool result key with path impacted[0:10] and again with path cypher. Use only those peeked values to build the final impact array and cypher_used entry.",
+          "Use neo4j.get_data for ad-hoc follow-up graph questions that are not a core blast-radius impact query, especially counts or filters. Include the Cypher returned by neo4j.get_data in cypher_used.",
+          "Use repo_id in every tool request. For Neo4j questions, explicitly mention that Function nodes must have the supplied repo_id.",
+          "Always answer with one valid JSON object and no markdown: {\"impact\":[...],\"summary\":str,\"cypher_used\":[...],\"memory_notes\":str|null}. impact must always be a JSON array, never blank or omitted. cypher_used must always be a JSON array. Return at most the top 10 impact entries. Impact entries should include fqn when available, plus risk, hops, tests, centrality, community, and file_path when the tool result provides them."
+        ],
+        "max_waves": 15,
+        "parameters": {}
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "in"
+        }
+      ]
+    },
+    {
+      "id": "agent_llm",
+      "provider": "llm_gemini",
+      "config": {
+        "profile": "gemini-3_1-pro-preview",
+        "gemini-3_1-pro-preview": {
+          "apikey": "${ROCKETRIDE_GEMINI_KEY}"
+        },
+        "parameters": {}
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent"
+        }
+      ]
+    },
+    {
+      "id": "cypher_llm",
+      "provider": "llm_gemini",
+      "config": {
+        "profile": "gemini-3-flash-preview",
+        "gemini-3-flash-preview": {
+          "apikey": "${ROCKETRIDE_GEMINI_KEY}"
+        },
+        "parameters": {}
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "neo4j"
+        }
+      ]
+    },
+    {
+      "id": "mem",
+      "provider": "memory_internal",
+      "config": {
+        "type": "memory_internal"
+      },
+      "control": [
+        {
+          "classType": "memory",
+          "from": "agent"
+        }
+      ]
+    },
+    {
+      "id": "ripple_tools",
+      "provider": "mcp_client",
+      "config": {
+        "serverName": "ripple",
+        "transport": "streamable-http",
+        "endpoint": "http://127.0.0.1:8790/mcp",
+        "headers": {},
+        "bearer": ""
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent"
+        }
+      ]
+    },
+    {
+      "id": "neo4j",
+      "provider": "db_neo4j",
+      "config": {
+        "uri": "${NEO4J_URI}",
+        "auth_method": "userpass",
+        "user": "${NEO4J_USER}",
+        "password": "${NEO4J_PASSWORD}",
+        "database": "${NEO4J_DATABASE}",
+        "db_description": "RIPPLE is a read-only Neo4j knowledge graph for Python repositories. All repo-scoped nodes have repo_id. Repo nodes have id, name, default_branch, ingested_at, repo_id, uid. File nodes have uid, path, loc, lang, repo_id. Function nodes have uid, fqn, name, file_path, start_line, end_line, doc, is_test, repo_id, blast_score, community. Test functions carry both Function and Test labels. Class nodes have uid, fqn, name, file_path, start_line, end_line, repo_id. Commit nodes have uid, sha, author, ts, message, repo_id. Relationships include (Repo)-[:CONTAINS]->(File), (File)-[:DEFINES]->(Function|Class), (Class)-[:DEFINES]->(Function), (Function)-[:CALLS {count}]->(Function), IMPORTS, INHERITS, (Test)-[:COVERS {depth}]->(Function), and (Commit)-[:TOUCHED]->(File). CALLS edges point caller to callee. Blast radius means production Function dependents that transitively CALL the target in reverse direction, excluding is_test functions. Risk is coalesce(dependent.blast_score,0.0) * (1.0 / hops) * 1.5 when tests=0 else 1.0, rounded to 3 decimals. Function.blast_score is reversed-CALLS PageRank. Function.community is the graph community id. Function.uid is repo_id#fqn.",
+        "max_attempts": 5,
+        "allow_execute": false
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent"
+        }
+      ]
+    },
+    {
+      "id": "out",
+      "provider": "response_answers",
+      "config": {
+        "laneName": "answers"
+      },
+      "input": [
+        {
+          "lane": "answers",
+          "from": "agent"
+        }
+      ]
+    }
+  ],
+  "project_id": "1535d2f1-611a-44f2-9f32-eaa0a21b9e88",
+  "source": "in",
+  "version": 1
+}

@@ -1,0 +1,15 @@
+[project]
+name = "ripple-gateway"
+version = "0.1.0"
+description = "Local gateway for RIPPLE RocketRide pipelines"
+requires-python = ">=3.12"
+dependencies = [
+    "httpx>=0.27",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build]
+packages = ["src/ripple_gateway"]

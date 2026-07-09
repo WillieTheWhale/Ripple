@@ -1,0 +1,97 @@
+{
+  "components": [
+    {
+      "id": "in",
+      "provider": "webhook",
+      "config": {
+        "mode": "Source",
+        "parameters": {},
+        "type": "webhook"
+      }
+    },
+    {
+      "id": "agent",
+      "provider": "agent_rocketride",
+      "config": {
+        "agent_description": "RIPPLE ingestion operator. Starts repository graph ingestion through the RIPPLE MCP service and reports the final JSON summary.",
+        "instructions": [
+          "You are RIPPLE's ingestion operator. The incoming question text is a JSON object string with repo_url or repo_url_or_path, repo_id, and optional wipe.",
+          "Parse the JSON. Call ripple.ingest_repo with repo_url_or_path set to repo_url or repo_url_or_path, repo_id set to the supplied repo_id, and wipe defaulting to true.",
+          "Poll ripple.job_status using the returned job_id until status is done or failed. If status is running, poll again.",
+          "When the job is done, answer with the job result JSON object verbatim and no markdown. If the job failed, answer with a JSON object containing status:\"failed\" and the error string."
+        ],
+        "max_waves": 4,
+        "parameters": {}
+      },
+      "input": [
+        {
+          "lane": "questions",
+          "from": "in"
+        }
+      ]
+    },
+    {
+      "id": "agent_llm",
+      "provider": "llm_gemini",
+      "config": {
+        "profile": "gemini-3-flash-preview",
+        "gemini-3-flash-preview": {
+          "apikey": "${ROCKETRIDE_GEMINI_KEY}"
+        },
+        "parameters": {}
+      },
+      "control": [
+        {
+          "classType": "llm",
+          "from": "agent"
+        }
+      ]
+    },
+    {
+      "id": "mem",
+      "provider": "memory_internal",
+      "config": {
+        "type": "memory_internal"
+      },
+      "control": [
+        {
+          "classType": "memory",
+          "from": "agent"
+        }
+      ]
+    },
+    {
+      "id": "ripple_tools",
+      "provider": "mcp_client",
+      "config": {
+        "serverName": "ripple",
+        "transport": "streamable-http",
+        "endpoint": "http://127.0.0.1:8790/mcp",
+        "headers": {},
+        "bearer": ""
+      },
+      "control": [
+        {
+          "classType": "tool",
+          "from": "agent"
+        }
+      ]
+    },
+    {
+      "id": "out",
+      "provider": "response_answers",
+      "config": {
+        "laneName": "answers"
+      },
+      "input": [
+        {
+          "lane": "answers",
+          "from": "agent"
+        }
+      ]
+    }
+  ],
+  "project_id": "a3a1801e-4c4d-44fb-8d80-0953a0819b2e",
+  "source": "in",
+  "version": 1
+}
