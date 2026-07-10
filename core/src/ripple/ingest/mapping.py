@@ -153,6 +153,7 @@ def map_graph(
                 "name": repo_path.name,
                 "default_branch": _default_branch(repo_path),
                 "ingested_at": timestamp,
+                "root_path": str(repo_path),
                 "repo_id": repo_id,
             },
         )
@@ -465,4 +466,3 @@ def _rel_count(properties: dict[str, Any]) -> int:
     except (TypeError, ValueError):
         return 1
     return max(count, 1)
-

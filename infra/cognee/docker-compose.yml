@@ -1,0 +1,69 @@
+services:
+  neo4j-memory:
+    image: neo4j:5
+    container_name: ripple-neo4j-memory
+    profiles: ["neo4j"]
+    environment:
+      NEO4J_AUTH: neo4j/memorypass
+    ports:
+      - "127.0.0.1:7475:7474"
+      - "127.0.0.1:7688:7687"
+    volumes:
+      - ripple-neo4j-memory-data:/data
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q -O - http://127.0.0.1:7474 >/dev/null 2>&1"]
+      interval: 5s
+      timeout: 3s
+      retries: 30
+    restart: unless-stopped
+
+  cognee:
+    image: cognee/cognee:main
+    container_name: ripple-cognee
+    environment:
+      GRAPH_DATABASE_PROVIDER: "${COGNEE_GRAPH_PROVIDER:-kuzu}"
+      GRAPH_DATABASE_URL: "${COGNEE_GRAPH_URL:-bolt://neo4j-memory:7687}"
+      GRAPH_DATABASE_USERNAME: "${COGNEE_GRAPH_USER:-neo4j}"
+      GRAPH_DATABASE_PASSWORD: "${COGNEE_GRAPH_PASSWORD:-memorypass}"
+      LLM_PROVIDER: custom
+      LLM_MODEL: openai/openai/gpt-4o-mini
+      LLM_ENDPOINT: https://models.github.ai/inference
+      LLM_API_KEY: "${ROCKETRIDE_GITHUB_TOKEN:?ROCKETRIDE_GITHUB_TOKEN is required}"
+      LLM_INSTRUCTOR_MODE: json_schema_mode
+      FALLBACK_MODEL: openai/openai/gpt-4o-mini
+      FALLBACK_ENDPOINT: https://models.github.ai/inference
+      FALLBACK_API_KEY: "${ROCKETRIDE_GITHUB_TOKEN:?ROCKETRIDE_GITHUB_TOKEN is required}"
+      EMBEDDING_PROVIDER: custom
+      EMBEDDING_MODEL: openai/openai/text-embedding-3-small
+      EMBEDDING_ENDPOINT: https://models.github.ai/inference
+      EMBEDDING_API_KEY: "${ROCKETRIDE_GITHUB_TOKEN:?ROCKETRIDE_GITHUB_TOKEN is required}"
+      EMBEDDING_DIMENSIONS: "1536"
+      REQUIRE_AUTHENTICATION: "true"
+      ENABLE_BACKEND_ACCESS_CONTROL: "${COGNEE_ACCESS_CONTROL:-true}"
+      DEFAULT_USER_EMAIL: "${COGNEE_USER:?COGNEE_USER is required}"
+      DEFAULT_USER_PASSWORD: "${COGNEE_PASSWORD:?COGNEE_PASSWORD is required}"
+      FASTAPI_USERS_JWT_SECRET: "${COGNEE_JWT_SECRET:?COGNEE_JWT_SECRET is required}"
+      FASTAPI_USERS_RESET_PASSWORD_TOKEN_SECRET: "${COGNEE_RESET_SECRET:?COGNEE_RESET_SECRET is required}"
+      FASTAPI_USERS_VERIFICATION_TOKEN_SECRET: "${COGNEE_VERIFY_SECRET:?COGNEE_VERIFY_SECRET is required}"
+      HASH_API_KEY: "true"
+      ACCEPT_LOCAL_FILE_PATH: "true"
+      ALLOW_CYPHER_QUERY: "false"
+      TELEMETRY_DISABLED: "true"
+    ports:
+      - "127.0.0.1:8890:8000"
+    volumes:
+      - ripple-cognee-system:/app/cognee/.cognee_system
+    healthcheck:
+      test:
+        - CMD
+        - python
+        - -c
+        - "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8000/health', timeout=5)"
+      interval: 5s
+      timeout: 6s
+      retries: 60
+    restart: unless-stopped
+
+volumes:
+  ripple-cognee-system:
+  ripple-neo4j-memory-data:

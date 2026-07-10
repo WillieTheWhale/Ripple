@@ -4,10 +4,16 @@ version = "0.1.0"
 description = "RIPPLE ingestion service"
 requires-python = ">=3.12"
 dependencies = [
+    "httpx>=0.27",
     "neo4j>=5",
     "python-igraph>=0.11",
     "leidenalg>=0.10",
     "pytest>=8.0",
+]
+
+[project.optional-dependencies]
+daytona = [
+    "daytona>=0.195.0",
 ]
 
 [build-system]
@@ -23,4 +29,3 @@ line-length = 100
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
-

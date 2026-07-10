@@ -15,18 +15,16 @@
       "config": {
         "agent_description": "RIPPLE blast-radius copilot for Python repositories ingested into a Neo4j knowledge graph.",
         "instructions": [
-          "You are RIPPLE's blast-radius copilot for Python repos ingested into a Neo4j knowledge graph.",
-          "The graph schema is Repo, File, Function, Test, Class, and Commit nodes. Relationships are CALLS, IMPORTS, DEFINES, INHERITS, COVERS, and TOUCHED. Function.blast_score is reversed-CALLS PageRank. Function.community is a graph community id. Function.uid is repo_id#fqn. Function.fqn is the stable function identifier. Function.repo_id scopes all queries.",
-          "Input is a JSON object string with repo_id, mode ask or fix, question, and optional intent. Parse it before using tools.",
-          "If mode is fix, answer exactly as a JSON object: {\"impact\":[],\"summary\":\"fix mode is not yet enabled\",\"cypher_used\":[],\"memory_notes\":null}.",
-          "For ask mode, never invent graph facts. Every factual claim must come from a tool result.",
-          "For core impact questions, prefer ripple.blast_radius because it returns the exact Cypher. If the question names a symbol instead of a full fqn, call ripple.resolve_symbol first and use the best matching candidate fqn. Include the blast_radius cypher in cypher_used.",
-          "After calling ripple.blast_radius, immediately use memory.peek on that tool result key with path impacted[0:10] and again with path cypher. Use only those peeked values to build the final impact array and cypher_used entry.",
-          "Use neo4j.get_data for ad-hoc follow-up graph questions that are not a core blast-radius impact query, especially counts or filters. Include the Cypher returned by neo4j.get_data in cypher_used.",
-          "Use repo_id in every tool request. For Neo4j questions, explicitly mention that Function nodes must have the supplied repo_id.",
-          "Always answer with one valid JSON object and no markdown: {\"impact\":[...],\"summary\":str,\"cypher_used\":[...],\"memory_notes\":str|null}. impact must always be a JSON array, never blank or omitted. cypher_used must always be a JSON array. Return at most the top 10 impact entries. Impact entries should include fqn when available, plus risk, hops, tests, centrality, community, and file_path when the tool result provides them."
+          "Input is JSON with request_id, repo_id, mode, question, and intent. Preserve request_id exactly. First call ripple.memory_recall with repo_id and the question. Never invent graph facts or claim tests passed unless ripple.verify_patch says passed=true.",
+          "Resolve a named symbol with ripple.resolve_symbol when needed. Call ripple.blast_radius for the chosen fqn; it returns ranked impact and exact read-only Cypher.",
+          "Fix mode: call ripple.read_function_source and use memory.peek path source. Call ripple.prepare_sandbox once, poll ripple.job_status to done, and peek path result for sandbox_id. Inspect any test file before editing with ripple.sandbox_download.",
+          "Draft a minimal complete git unified diff against exact source. Call ripple.verify_patch with the input request_id, repo_id, sandbox_id, diff_text, and changed production fqns. Poll to done and peek path result. On failure, use log_tail and retry a complete diff; maximum 3 verify calls.",
+          "After passed verification, call ripple.open_draft_pr using that verify job id and its exact canonical diff. Poll a returned PR job; use null when PR is skipped. Call ripple.memory_remember with a concise note containing the decision, blast radius size, uncovered count, and failed verification attempts or fragility. Then call ripple.finalize_fix_result with input request_id, verify job id, PR job id or null, blast impact, blast Cypher, iteration count, and memory_notes containing the remember result.",
+          "finalize_fix_result is the last fix tool. Next set done=true and answer exactly {{memory.ref:<finalize result key>:json}} with no wrapper.",
+          "If the Wave budget is ending after exact source inspection and you have a complete diff but no verification result, set done=true and answer only JSON {\"mode\":\"fix\",\"repo_id\":<input repo_id>,\"request_id\":<input request_id>,\"changed_fqns\":[<target fqn>],\"diff_text\":<complete diff>}. Never put ellipses or assumed source in this handoff; the gateway will submit it to the same MCP and Daytona proof contract.",
+          "Ask mode: use the earlier ripple.memory_recall result, resolve, call ripple.blast_radius, peek impacted[0:10] and cypher, then return only JSON {\"impact\":[...],\"summary\":str,\"cypher_used\":[...],\"memory_notes\":[...]}. Quote relevant recalled notes verbatim and label them from repo memory. Use at most 10 impacts."
         ],
-        "max_waves": 15,
+        "max_waves": 12,
         "parameters": {}
       },
       "input": [
@@ -38,11 +36,14 @@
     },
     {
       "id": "agent_llm",
-      "provider": "llm_gemini",
+      "provider": "llm_openai_api",
       "config": {
-        "profile": "gemini-3_1-pro-preview",
-        "gemini-3_1-pro-preview": {
-          "apikey": "${ROCKETRIDE_GEMINI_KEY}"
+        "profile": "custom",
+        "custom": {
+          "model": "openai/gpt-4.1-nano",
+          "base_url": "https://models.github.ai/inference",
+          "modelTotalTokens": 1048576,
+          "apikey": "${ROCKETRIDE_GITHUB_TOKEN}"
         },
         "parameters": {}
       },
@@ -50,23 +51,6 @@
         {
           "classType": "llm",
           "from": "agent"
-        }
-      ]
-    },
-    {
-      "id": "cypher_llm",
-      "provider": "llm_gemini",
-      "config": {
-        "profile": "gemini-3-flash-preview",
-        "gemini-3-flash-preview": {
-          "apikey": "${ROCKETRIDE_GEMINI_KEY}"
-        },
-        "parameters": {}
-      },
-      "control": [
-        {
-          "classType": "llm",
-          "from": "neo4j"
         }
       ]
     },
@@ -89,29 +73,9 @@
       "config": {
         "serverName": "ripple",
         "transport": "streamable-http",
-        "endpoint": "http://127.0.0.1:8790/mcp",
+        "endpoint": "${RIPPLE_MCP_ENDPOINT}",
         "headers": {},
         "bearer": ""
-      },
-      "control": [
-        {
-          "classType": "tool",
-          "from": "agent"
-        }
-      ]
-    },
-    {
-      "id": "neo4j",
-      "provider": "db_neo4j",
-      "config": {
-        "uri": "${NEO4J_URI}",
-        "auth_method": "userpass",
-        "user": "${NEO4J_USER}",
-        "password": "${NEO4J_PASSWORD}",
-        "database": "${NEO4J_DATABASE}",
-        "db_description": "RIPPLE is a read-only Neo4j knowledge graph for Python repositories. All repo-scoped nodes have repo_id. Repo nodes have id, name, default_branch, ingested_at, repo_id, uid. File nodes have uid, path, loc, lang, repo_id. Function nodes have uid, fqn, name, file_path, start_line, end_line, doc, is_test, repo_id, blast_score, community. Test functions carry both Function and Test labels. Class nodes have uid, fqn, name, file_path, start_line, end_line, repo_id. Commit nodes have uid, sha, author, ts, message, repo_id. Relationships include (Repo)-[:CONTAINS]->(File), (File)-[:DEFINES]->(Function|Class), (Class)-[:DEFINES]->(Function), (Function)-[:CALLS {count}]->(Function), IMPORTS, INHERITS, (Test)-[:COVERS {depth}]->(Function), and (Commit)-[:TOUCHED]->(File). CALLS edges point caller to callee. Blast radius means production Function dependents that transitively CALL the target in reverse direction, excluding is_test functions. Risk is coalesce(dependent.blast_score,0.0) * (1.0 / hops) * 1.5 when tests=0 else 1.0, rounded to 3 decimals. Function.blast_score is reversed-CALLS PageRank. Function.community is the graph community id. Function.uid is repo_id#fqn.",
-        "max_attempts": 5,
-        "allow_execute": false
       },
       "control": [
         {

@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import difflib
 import json
 import os
 import re
 import sys
+import uuid
 from pathlib import Path
 from typing import Any, NoReturn
 from urllib.parse import urlsplit, urlunsplit
@@ -19,6 +21,7 @@ TASKS_FILE = ROOT / ".ripple_tasks.json"
 PIPELINES = {
     "p1": ROOT / "pipelines" / "ripple_ingest.pipe",
     "p2": ROOT / "pipelines" / "ripple_ask.pipe",
+    "p3": ROOT / "pipelines" / "ripple_draft.pipe",
 }
 
 _PLACEHOLDER_RE = re.compile(r"\$\{([^}]+)\}")
@@ -33,7 +36,9 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "up":
         return asyncio.run(_up(env))
     if args.command == "ask":
-        return _ask(env, args.repo_id, args.question, args.intent, args.timeout)
+        return _ask(env, args.repo_id, args.question, args.intent, args.timeout, mode="ask")
+    if args.command == "fix":
+        return _ask(env, args.repo_id, args.question, args.intent, args.timeout, mode="fix")
     if args.command == "ingest":
         return _ingest(env, args.repo_url, args.repo_id, args.wipe, args.timeout)
     if args.command == "down":
@@ -87,10 +92,20 @@ async def _up(env: dict[str, str]) -> int:
         await client.disconnect()
 
 
-def _ask(env: dict[str, str], repo_id: str, question: str, intent: str | None, timeout: float) -> int:
+def _ask(
+    env: dict[str, str],
+    repo_id: str,
+    question: str,
+    intent: str | None,
+    timeout: float,
+    *,
+    mode: str,
+) -> int:
+    request_id = uuid.uuid4().hex
     task = {
+        "request_id": request_id,
         "repo_id": repo_id,
-        "mode": "ask",
+        "mode": mode,
         "question": question,
         "intent": intent or "",
     }
@@ -179,11 +194,320 @@ def _call_pipeline(
         "Content-Type": "lane/questions",
     }
     body = {"questions": [{"text": json.dumps(task, separators=(",", ":"))}]}
-    response = httpx.post(url, params={"token": token}, headers=headers, json=body, timeout=timeout)
+    try:
+        response = httpx.post(
+            url,
+            params={"token": token},
+            headers=headers,
+            json=body,
+            timeout=timeout,
+        )
+    except httpx.TimeoutException:
+        if key != "p2" or task.get("mode") != "fix" or not task.get("request_id"):
+            raise
+        return _recover_finalized_fix_result(
+            env,
+            str(task["request_id"]),
+            timeout=75.0,
+        )
     response.raise_for_status()
     payload = response.json()
     answer = _extract_answer(payload)
-    return _parse_answer(answer)
+    parsed = _parse_answer(answer)
+    if key == "p2" and task.get("mode") == "fix" and _is_unverified_fix_draft(parsed):
+        return _complete_fix_draft(env, task, parsed, timeout=180.0)
+    if key == "p2" and task.get("mode") == "fix" and _is_empty_agent_answer(parsed):
+        return _draft_and_verify_fallback(env, task, timeout=180.0)
+    return parsed
+
+
+def _is_empty_agent_answer(answer: Any) -> bool:
+    if not isinstance(answer, dict) or any(
+        key in answer for key in ("mode", "diff", "verification")
+    ):
+        return False
+    value = str(answer.get("answer") or "").strip()
+    return not value or value.startswith("LLM error:")
+
+
+def _is_unverified_fix_draft(answer: Any) -> bool:
+    return (
+        isinstance(answer, dict)
+        and answer.get("mode") == "fix"
+        and isinstance(answer.get("diff_text"), str)
+        and bool(answer["diff_text"].strip())
+        and isinstance(answer.get("changed_fqns"), list)
+        and "verification" not in answer
+    )
+
+
+def _draft_and_verify_fallback(
+    env: dict[str, str],
+    task: dict[str, Any],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    return asyncio.run(_draft_and_verify_fallback_async(env, task, timeout=timeout))
+
+
+async def _draft_and_verify_fallback_async(
+    env: dict[str, str],
+    task: dict[str, Any],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    question = str(task.get("question") or "")
+    match = re.search(r"[A-Za-z0-9_./-]+\.py:[A-Za-z_][A-Za-z0-9_.]*", question)
+    if match is None:
+        raise ValueError("RocketRide draft fallback requires a target Python fqn in the question")
+    fqn = match.group(0)
+    repo_id = str(task.get("repo_id") or "")
+    request_id = str(task.get("request_id") or "")
+    source = await _mcp_call(
+        env,
+        "read_function_source",
+        {"repo_id": repo_id, "fqn": fqn},
+        timeout=15.0,
+    )
+    prompt = (
+        "You are the constrained draft stage inside a RocketRide coding pipeline. "
+        "Return one JSON object and no markdown with the key replacement_source. "
+        "replacement_source must contain the complete replacement for the target function, "
+        "including its signature and body, with no ellipses or surrounding markdown. "
+        "Preserve all behavior except the requested minimal change. "
+        f"Repository id: {repo_id}. Target fqn: {fqn}. Request: {question}. "
+        f"Exact source record: {json.dumps(source, separators=(',', ':'))}"
+    )
+    draft_response = _call_pipeline(env, "p3", {"prompt": prompt}, timeout=60.0)
+    if not isinstance(draft_response, dict):
+        raise ValueError("RocketRide draft pipeline returned no JSON object")
+    replacement_source = draft_response.get("replacement_source")
+    if not isinstance(replacement_source, str) or not replacement_source.strip():
+        raise ValueError("RocketRide draft pipeline returned no replacement_source")
+    draft = {
+        "mode": "fix",
+        "repo_id": repo_id,
+        "request_id": request_id,
+        "diff_text": _build_function_diff(source, replacement_source),
+        "changed_fqns": [fqn],
+    }
+    return await _verify_fix_draft(
+        env,
+        repo_id,
+        request_id,
+        str(draft["diff_text"] or ""),
+        [str(value) for value in draft["changed_fqns"]],
+        timeout=timeout,
+    )
+
+
+def _build_function_diff(source: dict[str, Any], replacement_source: str) -> str:
+    file_path = str(source.get("file_path") or "").strip()
+    if not file_path or file_path.startswith("/") or ".." in Path(file_path).parts:
+        raise ValueError("Function source record contained an invalid file_path")
+    if "\n" in file_path or "\r" in file_path:
+        raise ValueError("Function source record contained an invalid file_path")
+
+    original_source = source.get("source")
+    if not isinstance(original_source, str) or not original_source:
+        raise ValueError("Function source record contained no source")
+    replacement = replacement_source.strip("\r\n")
+    if not replacement or replacement.lstrip().startswith("```"):
+        raise ValueError("RocketRide replacement_source was empty or markdown-wrapped")
+    if replacement == original_source.strip("\r\n"):
+        raise ValueError("RocketRide replacement_source did not change the function")
+
+    start_line = int(source.get("start_line") or 0)
+    if start_line < 1:
+        raise ValueError("Function source record contained an invalid start_line")
+    diff_lines = list(
+        difflib.unified_diff(
+            original_source.splitlines(),
+            replacement.splitlines(),
+            fromfile=f"a/{file_path}",
+            tofile=f"b/{file_path}",
+            lineterm="",
+        )
+    )
+    if len(diff_lines) < 3:
+        raise ValueError("RocketRide replacement_source produced no patch")
+
+    offset = start_line - 1
+    for index, line in enumerate(diff_lines):
+        match = re.fullmatch(
+            r"@@ -(\d+)(,\d+)? \+(\d+)(,\d+)? @@(.*)",
+            line,
+        )
+        if match is None:
+            continue
+        old_start = int(match.group(1)) + offset
+        new_start = int(match.group(3)) + offset
+        diff_lines[index] = (
+            f"@@ -{old_start}{match.group(2) or ''} "
+            f"+{new_start}{match.group(4) or ''} @@{match.group(5)}"
+        )
+    return "\n".join(diff_lines) + "\n"
+
+
+def _complete_fix_draft(
+    env: dict[str, str],
+    task: dict[str, Any],
+    draft: dict[str, Any],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    request_id = str(task.get("request_id") or "")
+    repo_id = str(task.get("repo_id") or "")
+    if draft.get("request_id") != request_id or draft.get("repo_id") != repo_id:
+        raise ValueError("RocketRide fix draft did not match the active request")
+    fqns = [str(fqn) for fqn in draft["changed_fqns"] if str(fqn).strip()]
+    if not fqns:
+        raise ValueError("RocketRide fix draft did not contain changed_fqns")
+    diff_text = str(draft["diff_text"])
+    if len(diff_text.encode("utf-8")) > 100_000:
+        raise ValueError("RocketRide fix draft exceeded the 100KB verification limit")
+    return asyncio.run(
+        _verify_fix_draft(
+            env,
+            repo_id,
+            request_id,
+            diff_text,
+            fqns,
+            timeout=timeout,
+        )
+    )
+
+
+async def _verify_fix_draft(
+    env: dict[str, str],
+    repo_id: str,
+    request_id: str,
+    diff_text: str,
+    fqns: list[str],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    endpoint = env.get("RIPPLE_MCP_ENDPOINT", "http://127.0.0.1:8790/mcp")
+    deadline = asyncio.get_running_loop().time() + timeout
+    async with streamable_http_client(endpoint) as (read, write, _):
+        async with ClientSession(read, write) as session:
+            await session.initialize()
+            queued = _mcp_result(
+                await session.call_tool(
+                    "verify_fix",
+                    {
+                        "repo_id": repo_id,
+                        "request_id": request_id,
+                        "diff_text": diff_text,
+                        "fqns": fqns,
+                    },
+                )
+            )
+            job_id = str(queued.get("job_id") or "")
+            if not job_id:
+                raise RuntimeError(f"Composite verification returned no job_id: {queued}")
+            while asyncio.get_running_loop().time() < deadline:
+                record = _mcp_result(
+                    await session.call_tool("job_status", {"job_id": job_id})
+                )
+                if record.get("status") == "done":
+                    result = record.get("result")
+                    if not isinstance(result, dict) or not result.get("passed"):
+                        raise RuntimeError(f"RocketRide draft did not pass verification: {result}")
+                    return _mcp_result(
+                        await session.call_tool(
+                            "get_finalized_fix_result",
+                            {"request_id": request_id, "wait_seconds": 10},
+                        )
+                    )
+                if record.get("status") == "failed":
+                    raise RuntimeError(f"Composite verification failed: {record.get('error')}")
+                await asyncio.sleep(0.25)
+    raise TimeoutError(f"Composite verification timed out for request_id: {request_id}")
+
+
+def _mcp_result(response: Any) -> dict[str, Any]:
+    if response.isError:
+        raise RuntimeError(f"MCP tool failed: {response.content}")
+    if isinstance(response.structuredContent, dict):
+        return response.structuredContent
+    for item in response.content:
+        text = getattr(item, "text", None)
+        if isinstance(text, str):
+            parsed = json.loads(text)
+            if isinstance(parsed, dict):
+                return parsed
+    raise RuntimeError("MCP tool returned no structured result")
+
+
+async def _mcp_call(
+    env: dict[str, str],
+    name: str,
+    arguments: dict[str, Any],
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    endpoint = env.get("RIPPLE_MCP_ENDPOINT", "http://127.0.0.1:8790/mcp")
+
+    async def call() -> dict[str, Any]:
+        async with streamable_http_client(endpoint) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                return _mcp_result(await session.call_tool(name, arguments))
+
+    return await asyncio.wait_for(call(), timeout=timeout)
+
+
+def _recover_finalized_fix_result(
+    env: dict[str, str],
+    request_id: str,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    return asyncio.run(_fetch_finalized_fix_result(env, request_id, timeout=timeout))
+
+
+async def _fetch_finalized_fix_result(
+    env: dict[str, str],
+    request_id: str,
+    *,
+    timeout: float,
+) -> dict[str, Any]:
+    from mcp import ClientSession
+    from mcp.client.streamable_http import streamable_http_client
+
+    endpoint = env.get("RIPPLE_MCP_ENDPOINT", "http://127.0.0.1:8790/mcp")
+
+    async def fetch() -> dict[str, Any]:
+        async with streamable_http_client(endpoint) as (read, write, _):
+            async with ClientSession(read, write) as session:
+                await session.initialize()
+                response = await session.call_tool(
+                    "get_finalized_fix_result",
+                    {
+                        "request_id": request_id,
+                        "wait_seconds": max(0.0, min(timeout - 10.0, 60.0)),
+                    },
+                )
+                if response.isError:
+                    raise RuntimeError(f"Finalized proof recovery failed: {response.content}")
+                if isinstance(response.structuredContent, dict):
+                    return response.structuredContent
+                for item in response.content:
+                    text = getattr(item, "text", None)
+                    if isinstance(text, str):
+                        parsed = json.loads(text)
+                        if isinstance(parsed, dict):
+                            return parsed
+                raise RuntimeError("Finalized proof recovery returned no structured result")
+
+    return await asyncio.wait_for(fetch(), timeout=timeout)
 
 
 def _extract_answer(payload: dict[str, Any]) -> Any:
@@ -198,6 +522,15 @@ def _extract_answer(payload: dict[str, Any]) -> Any:
 
 def _parse_answer(answer: Any) -> Any:
     if isinstance(answer, dict):
+        structured = answer.get("structuredContent")
+        if isinstance(structured, dict):
+            return structured
+        content = answer.get("content")
+        if isinstance(content, list):
+            for item in content:
+                parsed = _parse_answer(item)
+                if parsed is not item:
+                    return parsed
         for key in ("answer", "text", "content"):
             value = answer.get(key)
             if isinstance(value, str):
@@ -205,11 +538,19 @@ def _parse_answer(answer: Any) -> Any:
         return answer
     if not isinstance(answer, str):
         return answer
-    stripped = _strip_code_fence(answer.strip())
+    stripped = _strip_code_fence(_strip_text_content_envelope(answer.strip()))
     try:
-        return json.loads(stripped)
+        return _parse_answer(json.loads(stripped))
     except json.JSONDecodeError:
         return {"answer": answer}
+
+
+def _strip_text_content_envelope(value: str) -> str:
+    # Agent nodes sometimes emit an MCP TextContent rendered as "type: text\ntext: <payload>".
+    match = re.match(r"^type:\s*text\s*\ntext:\s*", value)
+    if match:
+        return value[match.end():].strip()
+    return value
 
 
 def _strip_code_fence(value: str) -> str:
@@ -262,6 +603,7 @@ def _load_env(path: Path) -> dict[str, str]:
         "NEO4J_USER": "neo4j",
         "NEO4J_PASSWORD": "ripplepass",
         "NEO4J_DATABASE": "neo4j",
+        "RIPPLE_MCP_ENDPOINT": "http://127.0.0.1:8790/mcp",
     }
     for key, value in defaults.items():
         env.setdefault(key, value)
@@ -306,6 +648,12 @@ def _build_parser() -> argparse.ArgumentParser:
     ask.add_argument("--question", required=True)
     ask.add_argument("--intent", default="")
     ask.add_argument("--timeout", type=float, default=180.0)
+
+    fix = subparsers.add_parser("fix", help="Ask the P2 RIPPLE agent to verify a fix")
+    fix.add_argument("--repo-id", required=True)
+    fix.add_argument("--question", required=True)
+    fix.add_argument("--intent", default="")
+    fix.add_argument("--timeout", type=float, default=240.0)
 
     ingest = subparsers.add_parser("ingest", help="Trigger the P1 ingest agent")
     ingest.add_argument("--repo-url", required=True)
