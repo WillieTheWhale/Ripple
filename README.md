@@ -64,3 +64,19 @@ The detailed architecture and phase contracts are in
 RIPPLE builds on the open-source `harshkedia177/axon` parser and graph extraction work.
 The Neo4j mapping and risk model, RocketRide pipelines, Daytona verification contract,
 Cognee memory integration, gateway, and MCP tools are implemented in this project.
+
+## Future Phases
+
+- **Phase 6 — Product chassis:** Add the user-facing application backend: sign-in,
+  per-user repository data, saved analyses and fixes, realtime updates, rate limits, and
+  plan/billing controls. A local FastAPI version will keep development fully runnable,
+  while a Butterbase deployment kit will make the production swap mechanical once its
+  credentials are available.
+- **Phase 7 — Frontend:** Turn the backend into the complete RIPPLE experience. Engineers
+  will see the code graph ripple outward from a changed function, inspect ranked risks and
+  exact Cypher, watch sandbox tests and diffs in an agent theater, revisit remembered
+  decisions, and manage repositories and billing from one dark, work-focused interface.
+- **Phase 8 — Production proof:** Exercise the whole journey against a flagship repository,
+  run one cold-start end-to-end smoke from login through verified fix and fresh-session
+  memory recall, capture demo artifacts, finish cloud and operations documentation, and
+  complete a final security, cleanup, and code-review pass.
